@@ -54,51 +54,60 @@ if [[ "$uuid" == "" ]]; then
 	exit 1
 fi
 
+fssize=$($BTRFS_UTIL_PROG fi usage -b $SCRATCH_MNT |grep "Device size" |\
+	grep -Eo "[0-9]+")
+
 start_data_bg_phy=$(get_data_bg_physical)
 start_data_bg_phy=$((start_data_bg_phy >> 9))
-size=$(_zone_capacity $start_data_bg_phy)
 
-reclaim_threshold=75
-echo $reclaim_threshold > /sys/fs/btrfs/"$uuid"/bg_reclaim_threshold
-fill_percent=$((reclaim_threshold + 2))
-rest_percent=$((90 - fill_percent)) # make sure we're not creating a new BG
-fill_size=$((size * fill_percent / 100))
-rest=$((size * rest_percent / 100))
+zone_cap=$(_zone_capacity $start_data_bg_phy)
 
-# step 1, fill FS over $fillsize
-$XFS_IO_PROG -fc "pwrite 0 $fill_size" $SCRATCH_MNT/$seq.test1 >> $seqres.full
-$XFS_IO_PROG -fc "pwrite 0 $rest" $SCRATCH_MNT/$seq.test2 >> $seqres.full
+# Set it to a lower value to speed up the test
+fs_reclaim_threshold=51
+echo $fs_reclaim_threshold > /sys/fs/btrfs/"$uuid"/bg_reclaim_threshold
+
+fs_fill_percent=$((fs_reclaim_threshold + 2))
+fill_size=$((fssize * fs_fill_percent / 100))
+
+# This small file that fits within a zone will be used to verify the relocation
+relocate_file_size=$((zone_cap * 2 / 100))
+
+# step 1, fill FS over $relocate_file_size and $fill_size
+$XFS_IO_PROG -fc "pwrite 0 $relocate_file_size" $SCRATCH_MNT/$seq.test1 >> $seqres.full
 $BTRFS_UTIL_PROG filesystem sync $SCRATCH_MNT
 
-zones_before=$($BLKZONE_PROG report $SCRATCH_DEV | grep -v -e em -e nw | wc -l)
-echo "Before reclaim: $zones_before zones open" >> $seqres.full
 old_data_zone=$(get_data_bg)
 old_data_zone=$((old_data_zone >> 9))
 printf "Old data zone 0x%x\n" $old_data_zone >> $seqres.full
 
-# step 2, delete the 1st $fill_size sized file to trigger reclaim
-rm $SCRATCH_MNT/$seq.test1
+$XFS_IO_PROG -fc "pwrite 0 $fill_size" $SCRATCH_MNT/$seq.test2 >> $seqres.full
 $BTRFS_UTIL_PROG filesystem sync $SCRATCH_MNT
-sleep 2 # 1 transaction commit for 'rm' and 1 for balance
 
-# check that we don't have more zones open than before
-zones_after=$($BLKZONE_PROG report $SCRATCH_DEV | grep -v -e em -e nw | wc -l)
-echo "After reclaim: $zones_after zones open" >> $seqres.full
+open_zones_before_reclaim=$($BLKZONE_PROG report --offset $start_data_bg_phy $SCRATCH_DEV |\
+	grep -v -e em -e nw | wc -l)
 
-# Check that old data zone was reset
-old_wptr=$($BLKZONE_PROG report -o $old_data_zone -c 1 $SCRATCH_DEV |\
-	grep -Eo "wptr 0x[[:xdigit:]]+" | cut -d ' ' -f 2)
-if [ "$old_wptr" != "0x000000" ]; then
-	_fail "Old wptr still at $old_wptr"
+# sanity check
+if [ $open_zones_before_reclaim -eq 0 ]; then
+	echo "Error writing to the device"
 fi
 
-new_data_zone=$(get_data_bg)
-new_data_zone=$((new_data_zone >> 9))
-printf "New data zone 0x%x\n" $new_data_zone >> $seqres.full
+echo "Before reclaim: $open_zones_before_reclaim zones open" >> $seqres.full
 
-# Check that data was really relocated to a different zone
-if [ $old_data_zone -eq $new_data_zone ]; then
-	echo "New zone same as old zone"
+# step 2, delete the $fill_size sized file to trigger reclaim
+rm $SCRATCH_MNT/$seq.test2
+$BTRFS_UTIL_PROG filesystem sync $SCRATCH_MNT
+sleep 5 # sleep for transaction commit for 'rm' and for balance
+
+open_zones_after_reclaim=$($BLKZONE_PROG report --offset $start_data_bg_phy $SCRATCH_DEV |\
+	grep -v -e em -e nw | wc -l)
+echo "After reclaim: $open_zones_after_reclaim zones open" >> $seqres.full
+
+reclaimed_bg_zone_empty=$($BLKZONE_PROG report --offset $start_data_bg_phy\
+	-c 1 $SCRATCH_DEV | grep -e em | wc -l)
+
+# Check that data from test1 file was really relocated to a different zone
+if [ $reclaimed_bg_zone_empty -eq 0 ]; then
+	echo "Error reclaiming the zone"
 fi
 
 # success, all done
