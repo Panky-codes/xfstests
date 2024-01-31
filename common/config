@@ -168,6 +168,8 @@ export XFS_SPACEMAN_PROG="$(type -P xfs_spaceman)"
 export XFS_SCRUB_PROG="$(type -P xfs_scrub)"
 export XFS_PARALLEL_REPAIR_PROG="$(type -P xfs_prepair)"
 export XFS_PARALLEL_REPAIR64_PROG="$(type -P xfs_prepair64)"
+export MIN_XFS_FS_SZ_MB=600
+
 export __XFSDUMP_PROG="$(type -P xfsdump)"
 if [ -n "$__XFSDUMP_PROG" ]; then
 	export XFSDUMP_PROG="$__XFSDUMP_PROG -e"
